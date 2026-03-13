@@ -1,0 +1,4 @@
+maxapi
+pyyaml
+aiomysql
+openpyxl
