@@ -1,0 +1,98 @@
+# ===== ОСНОВНЫЕ НАСТРОЙКИ =====
+bot:
+  token: "YOUR_MAX_BOT_TOKEN_HERE"      # токен бота MAX
+
+# ===== БАЗА ДАННЫХ (SQLite) =====
+database:
+  path: "bot.db"
+
+# ===== ТЕКСТЫ СООБЩЕНИЙ =====
+messages:
+  welcome: |
+    👋 Добро пожаловать!
+    Это бот для записи на день открытых дверей.
+    Нажмите кнопку ниже, чтобы записаться.
+
+  ask_parent_name: "📝 Введите ФИО родителя (законного представителя):"
+  ask_student_name: "📝 Введите ФИО ученика:"
+  ask_grade: "🎓 Укажите класс (например: 5А, 10Б):"
+  ask_birth_date: "📅 Введите дату рождения ученика (ДД.ММ.ГГГГ):"
+  choose_slot: "📅 Выберите удобную дату и время посещения:"
+
+  success: |
+    ✅ Вы успешно записаны!
+
+    👤 Родитель: {parent_name}
+    🧒 Ученик: {student_name}
+    🎓 Класс: {grade}
+    📅 Дата: {slot_date}
+    🕐 Время: {slot_time}
+
+    Ждём вас!
+
+  no_slots: "😔 Свободных дат нет. Попробуйте позже."
+
+  reminder: |
+    🔔 Напоминание!
+    {slot_date} в {slot_time} вас ждут на посещении.
+    Ученик: {student_name}
+
+  slot_cancelled: |
+    ⚠️ Дата посещения отменена.
+    Слот: {slot_date} в {slot_time}
+    Ученик: {student_name}
+    Нажмите /start чтобы выбрать другую дату.
+
+  already_registered: "⚠️ Вы уже записаны на эту дату."
+  slot_full: "⚠️ Все места на это время заняты."
+  invalid_date: "❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ"
+  invalid_name: "❌ ФИО: минимум 2 слова, только буквы"
+  invalid_grade: "❌ Укажите класс от 1 до 11 с буквой (например: 5А)"
+  cancelled: "❌ Действие отменено."
+  no_access: "🚫 У вас нет доступа."
+  service_unavailable: "⚠️ Сервис временно недоступен."
+
+  admin_welcome: |
+    ⚙️ Админ-панель
+    Выберите действие:
+
+# ===== ТЕКСТЫ КНОПОК =====
+buttons:
+  sign_up: "📝 Записаться"
+  cancel: "❌ Отмена"
+  back: "⬅️ Назад"
+  add_slot: "➕ Добавить дату"
+  remove_slot: "🗑 Удалить дату"
+  delete_reg: "👤 Удалить запись"
+  export_list: "📊 Экспорт записей"
+  view_slots: "📋 Все даты"
+
+# ===== НАСТРОЙКИ СЛОТОВ =====
+slots:
+  max_per_slot: 1
+  show_remaining: true
+  date_format: "%d.%m.%Y"
+  time_format: "%H:%M"
+
+# ===== АДМИНИСТРАТОРЫ =====
+admin_ids:
+  - 123456789
+  # - 987654321
+
+# ===== АВТООЧИСТКА =====
+cleanup:
+  enabled: true
+  delete_after_days: 30
+  run_at: "03:00"
+
+# ===== НАПОМИНАНИЯ =====
+reminders:
+  enabled: true
+  before_hours:
+    - 24
+    - 2
+  run_check_interval_minutes: 30
+
+# ===== ЭКСПОРТ =====
+export:
+  format: "xlsx"   # xlsx или csv
