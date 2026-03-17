@@ -2,3 +2,5 @@ maxapi
 pyyaml
 aiosqlite
 openpyxl
+reportlab
+odfpy

@@ -95,4 +95,4 @@ reminders:
 
 # ===== ЭКСПОРТ =====
 export:
-  format: "xlsx"   # xlsx или csv
+  format: "pdf"   # xlsx | csv | pdf | ods

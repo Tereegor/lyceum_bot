@@ -10,15 +10,19 @@ import re
 import sqlite3
 import sys
 from datetime import datetime, date, time, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import aiohttp
 import aiosqlite
 import yaml
 from openpyxl import Workbook
 
 from maxapi import Bot, Dispatcher
 from maxapi.context import MemoryContext, State, StatesGroup
+from maxapi.enums.attachment import AttachmentType
+from maxapi.enums.upload_type import UploadType
 from maxapi.types import (
     BotStarted,
     CallbackButton,
@@ -27,8 +31,9 @@ from maxapi.types import (
     MessageCreated,
 )
 from maxapi.types.attachments.attachment import ButtonsPayload
+from maxapi.types.attachments.attachment import Attachment, OtherAttachmentPayload
+from maxapi.types.attachments.upload import AttachmentPayload, AttachmentUpload
 from maxapi.types.attachments.buttons.attachment_button import AttachmentButton
-from maxapi.types.input_media import InputMedia
 
 logging.basicConfig(
     level=logging.INFO,
@@ -264,7 +269,7 @@ def validate_times(text: str) -> List[time]:
 
 
 def _kb(*rows: List[CallbackButton]) -> List[AttachmentButton]:
-    return [AttachmentButton(payload=ButtonsPayload(buttons=list(rows)))]
+    return [AttachmentButton(type="inline_keyboard", payload=ButtonsPayload(buttons=list(rows)))]
 
 
 def cancel_btn() -> CallbackButton:
@@ -360,8 +365,19 @@ async def on_myid_command(event: MessageCreated):
     await bot.send_message(
         chat_id=chat_id,
         user_id=user_id,
-        text=f"Ваш user_id: <code>{uid}</code>",
+        text=f"Ваш user_id: {uid}",
     )
+
+
+@dp.message_created(Command("myusername"))
+async def on_myusername_command(event: MessageCreated):
+    sender = event.message.sender
+    uid = sender.user_id
+    uname = getattr(sender, "username", None) or ""
+    chat_id = event.message.recipient.chat_id
+    user_id = uid if not chat_id else None
+    text = f"Ваш user_id: {uid}\nВаш username: {uname or '—'}"
+    await bot.send_message(chat_id=chat_id, user_id=user_id, text=text)
 
 
 @dp.message_created(Command("admin"))
@@ -949,12 +965,39 @@ async def _handle_export(event, context, payload, chat_id, user_id):
         await event.answer(notification="Нет записей для экспорта.")
         return
     fmt = EXPORT_CFG.get("format", "xlsx")
-    filepath = await (_export_xlsx(rows) if fmt == "xlsx" else _export_csv(rows))
+    if fmt == "xlsx":
+        filepath = await _export_xlsx(rows)
+    elif fmt == "csv":
+        filepath = await _export_csv(rows)
+    elif fmt == "pdf":
+        filepath = await _export_pdf(rows)
+    elif fmt in ("ods", "odd"):
+        filepath = await _export_ods(rows)
+    else:
+        await event.answer(notification=f"Неизвестный формат экспорта: {fmt}")
+        return
     await context.clear()
     await context.set_state(AdminStates.menu)
     await event.answer()
-    await bot.send_message(chat_id=chat_id, user_id=user_id,
-                           text="📊 Файл экспорта:", attachments=[InputMedia(filepath)])
+    try:
+        file_payload = await _upload_file_as_attachment_payload(filepath)
+        await bot.send_message(
+            chat_id=chat_id,
+            user_id=user_id,
+            text="📊 Файл экспорта:",
+            attachments=[Attachment(type=AttachmentType.FILE, payload=file_payload)],
+        )
+    except ModuleNotFoundError as e:
+        log.exception("Не установлена зависимость для экспорта")
+        await bot.send_message(
+            chat_id=chat_id,
+            user_id=user_id,
+            text=f"⚠️ Не установлена библиотека для экспорта: {e.name}\n"
+                 f"Установи зависимости: pip install -r requirements.txt",
+        )
+    except Exception:
+        log.exception("Ошибка при загрузке/отправке файла экспорта")
+        await bot.send_message(chat_id=chat_id, user_id=user_id, text=MESSAGES["service_unavailable"])
     await send_admin_menu(chat_id=chat_id, user_id=user_id)
     try:
         Path(filepath).unlink()
@@ -983,6 +1026,157 @@ async def _export_csv(rows: List[Dict]) -> str:
         for r in rows:
             w.writerow(_export_row(r))
     return filepath
+
+
+async def _export_pdf(rows: List[Dict]) -> str:
+    # Требуется пакет reportlab
+    try:
+        from reportlab.lib import colors  # type: ignore
+        from reportlab.lib.pagesizes import A4  # type: ignore
+        from reportlab.lib.styles import getSampleStyleSheet  # type: ignore
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer  # type: ignore
+        from reportlab.pdfbase import pdfmetrics  # type: ignore
+        from reportlab.pdfbase.ttfonts import TTFont  # type: ignore
+    except ModuleNotFoundError:
+        raise
+
+    filepath = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+
+    doc = SimpleDocTemplate(filepath, pagesize=A4)
+    styles = getSampleStyleSheet()
+
+    font_name = _ensure_cyrillic_pdf_font()
+    if font_name:
+        # Подменяем базовый шрифт, чтобы кириллица отображалась корректно
+        styles["Normal"].fontName = font_name
+        styles["Title"].fontName = font_name
+
+    data = [EXPORT_HEADERS] + [_export_row(r) for r in rows]
+
+    # Чуть поджимаем длинные строки (ФИО и т.п.) для влезания в PDF
+    def _cell(v: object) -> str:
+        s = "" if v is None else str(v)
+        return s
+
+    table = Table([[Paragraph(_cell(c), styles["Normal"]) for c in row] for row in data], repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), styles["Normal"].fontName),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("FONTSIZE", (0, 0), (-1, -1), 8),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+
+    doc.build([Paragraph("Экспорт записей", styles["Title"]), Spacer(1, 10), table])
+    return filepath
+
+
+@lru_cache(maxsize=1)
+def _ensure_cyrillic_pdf_font() -> str:
+    """
+    ReportLab по умолчанию не поддерживает кириллицу (получаются квадраты).
+    Регистрируем системный TTF-шрифт с кириллицей (Windows: Arial/DejaVu).
+    Возвращает имя зарегистрированного шрифта или пустую строку.
+    """
+    try:
+        from reportlab.pdfbase import pdfmetrics  # type: ignore
+        from reportlab.pdfbase.ttfonts import TTFont  # type: ignore
+    except Exception:
+        return ""
+
+    candidates = [
+        Path("C:/Windows/Fonts/arial.ttf"),
+        Path("C:/Windows/Fonts/ARIAL.TTF"),
+        Path("C:/Windows/Fonts/calibri.ttf"),
+        Path("C:/Windows/Fonts/CALIBRI.TTF"),
+        Path("C:/Windows/Fonts/times.ttf"),
+        Path("C:/Windows/Fonts/tahoma.ttf"),
+        Path("C:/Windows/Fonts/TAHOMA.TTF"),
+    ]
+
+    font_path = next((p for p in candidates if p.exists()), None)
+    if not font_path:
+        return ""
+
+    font_name = "CyrillicFont"
+    try:
+        pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+        return font_name
+    except Exception:
+        return ""
+
+
+async def _export_ods(rows: List[Dict]) -> str:
+    # Требуется пакет odfpy
+    try:
+        from odf.opendocument import OpenDocumentSpreadsheet  # type: ignore
+        from odf.table import Table, TableRow, TableCell  # type: ignore
+        from odf.text import P  # type: ignore
+    except ModuleNotFoundError:
+        raise
+
+    filepath = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.ods"
+
+    doc = OpenDocumentSpreadsheet()
+    sheet = Table(name="Записи")
+
+    def add_row(values: List[object]):
+        tr = TableRow()
+        for v in values:
+            tc = TableCell()
+            tc.addElement(P(text="" if v is None else str(v)))
+            tr.addElement(tc)
+        sheet.addElement(tr)
+
+    add_row(EXPORT_HEADERS)
+    for r in rows:
+        add_row(_export_row(r))
+
+    doc.spreadsheet.addElement(sheet)
+    doc.save(filepath)
+    return filepath
+
+
+async def _upload_file_as_attachment_payload(filepath: str) -> object:
+    """
+    Обход бага maxapi с InputMedia на Windows: грузим файл вручную через /uploads,
+    затем используем полученный payload как вложение типа FILE.
+    """
+    api_url = "https://platform-api.max.ru/uploads?type=file"
+    headers = {"Authorization": BOT_TOKEN}
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        async with session.post(api_url) as r:
+            r.raise_for_status()
+            upload = await r.json()
+            upload_url = upload["url"]
+
+        with open(filepath, "rb") as f:
+            form = aiohttp.FormData()
+            form.add_field("data", f)
+            async with session.post(upload_url, data=form) as r2:
+                r2.raise_for_status()
+                payload = await r2.json()
+
+    # MAX может вернуть разные payload для file upload:
+    # - {"url": "...", "token": "..."}  (некоторые типы)
+    # - {"fileId": 123, "token": "..."} (file upload)
+    if not isinstance(payload, dict) or "token" not in payload:
+        raise RuntimeError(f"Unexpected upload payload: {payload!r}")
+
+    if "url" in payload:
+        return OtherAttachmentPayload(url=payload["url"], token=payload.get("token"))
+
+    # Для file upload достаточно token (fileId можно игнорировать)
+    return AttachmentUpload(type=UploadType.FILE, payload=AttachmentPayload(token=payload["token"]))
 
 
 # ---------------------------------------------------------------------------
